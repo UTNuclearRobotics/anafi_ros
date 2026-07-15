@@ -892,6 +892,10 @@ class Anafi(Node):
 						msg_quality = UInt8()
 						msg_quality.data = vmeta[1]['links'][0]['starfish']['quality']  # [0=bad, 5=good]
 						self.pub_link_quality.publish(msg_quality)
+					elif 'wifi' in vmeta[1]['links'][0]:
+						msg_quality = UInt8()
+						msg_quality.data = vmeta[1]['links'][0]['wifi']['quality']  # [0=bad, 5=good]
+						self.pub_link_quality.publish(msg_quality)
 					else:
 						self.node.get_logger().fatal("The model is NOT '" + self.model + "'")
 						self.disconnect()
