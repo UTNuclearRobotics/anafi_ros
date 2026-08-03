@@ -21,6 +21,7 @@ import sys
 import yaml
 import olympe
 import anafi_ros_nodes
+from pathlib import Path
 
 from timeit import default_timer as timer
 from rclpy.node import Node
@@ -36,6 +37,8 @@ from std_srvs.srv import Trigger, SetBool
 from cv_bridge import CvBridge
 from olympe.messages import gimbal, camera, mapper, move, thermal, obstacle_avoidance
 from olympe.messages.drone_manager import connection_state
+from olympe.messages.flight_plan import start_at_v2
+from olympe.enums.flight_plan import mavlink_type
 from olympe.messages.ardrone3.Piloting import TakeOff, UserTakeOff, Landing, Emergency, PCMD, NavigateHome, StartPilotedPOIV2, StopPilotedPOI 
 from olympe.messages.ardrone3.PilotingState import FlyingStateChanged
 from olympe.messages.ardrone3.PilotingSettings import MaxTilt, MaxDistance, MaxAltitude, NoFlyOverMaxDistance, BankedTurn
@@ -935,10 +938,15 @@ class Anafi(Node):
 		self.node.get_logger().warning("Taking off")
 		result = self.drone(TakeOff()).wait()  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.TakeOff
 		if not self.simulation_environment:
-			run_id = self.drone.get_state(olympe.messages.common.RunState.RunIdChanged) # https://developer.parrot.com/docs/olympe/arsdkng_common_runstate.html#olympe.messages.common.RunState.RunIdChanged
-			self.node.get_logger().debug('Run Id: %s' % (run_id['runId']))
+			try:
+				run_id = self.drone.get_state(olympe.messages.common.RunState.RunIdChanged) # https://developer.parrot.com/docs/olympe/arsdkng_common_runstate.html#olympe.messages.common.RunState.RunIdChanged
+				self.node.get_logger().debug('Run Id: %s' % (run_id['runId']))
+
+			except ValueError:
+				self.node.get_logger().warning("RunIdChanged state not initialized yet")
+
 		response.success = result.success()
-		response.message = "" if response.success else "Takeoff command rejected by the drone"
+		response.message = ( "" if response.success else "Takeoff command rejected by the drone" )
 		return response
 	
 	def hand_launch_callback(self, request, response):
@@ -1045,36 +1053,78 @@ class Anafi(Node):
 		return response
 			
 	def flightplan_upload_callback(self, request, response): # https://forum.developer.parrot.com/t/olympe-mavlink-working-example/14041/2
-		self.node.get_logger().info("FlightPlan uploading from " + request.file)
-		self.node.get_logger().info("REST API: PUT http://" + self.ip + ":180/api/v" + self.rest_api_version + "/upload/flightplan,  data=" + request.file)
-		response = requests.put(url="http://" + self.ip + ":180/api/v" + self.rest_api_version + "/upload/flightplan", data=open(request.file, "rb"))
-		response.raise_for_status()
-		self.uid = response.json()
-		self.node.get_logger().info("FlightPlan uploaded with UID " + self.uid)
+		try:
+			self.node.get_logger().info("FlightPlan uploading from " + request.file)
+			self.node.get_logger().info("REST API: PUT http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan,  data=" + request.file)
+			# http_response = requests.put(url="http://" + self.ip + ":180/api/v" + str(self.rest_api_version) + "/upload/flightplan", data=open(request.file, "rb"))
+			http_response = requests.put(url="http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan", data=open(request.file, "rb"))
+
+			print(http_response.text)
+			print(http_response.json())
+
+			http_response.raise_for_status()
+			self.uid = str(http_response.json())
+			self.node.get_logger().info("FlightPlan uploaded with UID " + self.uid)
+			response.success = True
+			response.message = f"FlightPlan uploaded with UID {self.uid}"
+		except Exception as e:
+			response.success = False
+			response.message = f"Error uploading flightplan: {str(e)}"
+			self.node.get_logger().error(response.message)
 		return response
-		
-	def flightplan_start_callback(self, request, response): # https://forum.developer.parrot.com/t/olympe-mavlink-working-example/14041/2
-		uid = (request.uid if request.uid != "" else self.uid)
-		self.node.get_logger().warning("FlightPlan starting with UID " + uid)
-		self.node.get_logger().debug("REST API: GET http://" + self.ip + ":180/api/v" + self.rest_api_version + "/upload/flightplan/" + uid)
-		response = requests.get("http://" + self.ip + ":180/api/v" + self.rest_api_version + "/upload/flightplan/" + uid)
-		response.raise_for_status()
-		if response.status_code == requests.codes.ok:
-			self.drone(
-				olympe.messages.common.Mavlink.Start( # https://developer.parrot.com/docs/olympe/arsdkng_common_mavlink.html#olympe.messages.common.Mavlink.Start
-				filepath=uid, # TODO: check why sometimes doesn't take the filepath
-				type='flightPlan' # https://developer.parrot.com/docs/olympe/arsdkng_common_mavlink.html#olympe.enums.common.Mavlink.Start_Type
-			)).wait()
+
+	def flightplan_start_callback(self, request, response):
+		try:
+			flightplan_id = None
+
+			if request.file and request.file != "":
+				self.node.get_logger().info("FlightPlan uploading from " + request.file)
+				self.node.get_logger().debug("REST API: PUT http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan")
+				upload_response = requests.put(
+					url="http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan",
+					data=open(request.file, "rb")
+				)
+
+				print(upload_response.text)
+				print(upload_response.json())
+
 				
-			if self.drone.get_state(olympe.messages.common.FlightPlanState.AvailabilityStateChanged)['AvailabilityState'] == 0: # https://developer.parrot.com/docs/olympe/arsdkng_common_flightplan.html#olympe.messages.common.FlightPlanState.AvailabilityStateChanged
-				components = self.drone.get_state(olympe.messages.common.FlightPlanState.ComponentStateListChanged) # https://developer.parrot.com/docs/olympe/arsdkng_common_flightplan.html#olympe.messages.common.FlightPlanState.ComponentStateListChanged
-				for component in components:
-					if components[component]['State'] == 0:
-						self.node.get_logger().warning("FlightPlan: %s is NOT OK" % str(components[component]['component'].name))
-					else:
-						self.node.get_logger().info("FlightPlan: %s is OK" % str(components[component]['component'].name))
-		else:
-			self.node.get_logger().warning("UID %s does not exist onboard" % uid)
+				upload_response.raise_for_status()
+				flightplan_id = str(upload_response.json())
+				self.uid = flightplan_id
+				self.node.get_logger().info("FlightPlan uploaded with ID " + flightplan_id)
+			else:
+				flightplan_id = request.uid if request.uid != "" else self.uid
+
+			if not flightplan_id:
+				response.success = False
+				response.message = "No flightplan file or UID provided"
+				return response
+
+			self.node.get_logger().warning("FlightPlan starting with ID " + flightplan_id)
+			result = self.drone(
+				start_at_v2(
+					flightplan_id,
+					custom_id="",
+					type=mavlink_type.flightPlanV2,
+					item=0,
+					continue_on_disconnect=0,
+				)
+			).wait()
+
+			if result.success():
+				response.success = True
+				response.message = f"FlightPlan {flightplan_id} started successfully"
+				self.node.get_logger().info(response.message)
+			else:
+				response.success = False
+				response.message = f"Failed to start flightplan {flightplan_id}"
+				self.node.get_logger().warning(response.message)
+		except Exception as e:
+			response.success = False
+			response.message = f"Error starting flightplan: {str(e)}"
+			self.node.get_logger().error(response.message)
+
 		return response
 		
 	def flightplan_pause_callback(self, request, response):

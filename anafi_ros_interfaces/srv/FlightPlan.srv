@@ -1,3 +1,5 @@
 string file 	# flight plan file path on local computer
 string uid 	# flight plan uid in drone flightplans directory
 ---
+bool success	# true if the operation succeeded
+string message	# status message

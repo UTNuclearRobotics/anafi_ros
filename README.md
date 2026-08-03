@@ -132,11 +132,14 @@ To connect to the drone, run in the terminal:
 
 where
 * `namespace` is the namespace for this specific drone, it is used to connect to multiple drones;
-* `ip` is the IP address of the device to connect, it has to be
-  * `'192.168.53.1'`, for connection through Skycontroller (*recommended*),
-  * `'192.168.42.1'`, for direct connection to the drone through WiFi,
-  * `'10.202.0.1'`, for connection to the simulated drone in Sphinx;
-* `model` (ignored, when connecting through Skycontroller) is the model of the drone, it has to be `'4k'`, `'thermal'`, `'usa'` or `'ai'`, depending on the drone model you are connecting to.
+* `ip` is the IP address of the device to connect, Choose one of the following:
+
+| Connection type             | IP address     | Notes                                                                                                    |
+| --------------------------- | -------------- | -------------------------------------------------------------------------------------------------------- |
+| Skycontroller (recommended) | `192.168.53.1` | Connect the Skycontroller through the USB-C port on the bottom of the controller.                        |
+| Direct WiFi connection      | `192.168.42.1` | Direct connection to the drone over WiFi. This mode cannot be used while the Skycontroller is connected. |
+| Sphinx simulation           | `10.202.0.1`   | Connects to the simulated drone running in Sphinx.                                                       |
+
 
 > [!IMPORTANT]
 > To send commands to the drone, you must switch to offboard mode. To switch to offboard mode, set `drone/offboard` parameter to `True`.
