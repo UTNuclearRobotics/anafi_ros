@@ -6,6 +6,7 @@
     camera/hdr: true                           # Enable HDR
     camera/max_zoom_speed: 10.0                # Max zoom speed (in tan(deg)/sec) [0.1, 10.0]
     camera/mode: 0                             # Camera mode: 0 = camera in recording mode, 1 = camera in photo mode
+    camera/publish_compressed: true           # Publish CompressedImage on camera/image/compressed
     camera/stereo/disparity_map: false         # Stream disparity map image (supported only by ANAFI Ai): true = enabled; false = disabled
     camera/stereo/obstacle_avoidance: true     # Enable obstacle avoidance (supported only by ANAFI Ai): true = enabled; false = disabled
     camera/streaming: 0                        # Streaming mode: 0 = minimize latency with average reliability (best for piloting); 1 = maximize the reliability with an average latency; 2 = maximize the reliability using a framerate decimation with an average latency

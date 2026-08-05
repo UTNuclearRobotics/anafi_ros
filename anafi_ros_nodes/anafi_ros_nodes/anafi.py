@@ -31,7 +31,7 @@ from rcl_interfaces.msg import ParameterDescriptor, FloatingPointRange, IntegerR
 from ament_index_python.packages import get_package_share_directory
 from std_msgs.msg import UInt8, UInt16, Int8, Float32, String, Header, Bool
 from geometry_msgs.msg import PointStamped, QuaternionStamped, Vector3Stamped
-from sensor_msgs.msg import Image, CameraInfo
+from sensor_msgs.msg import Image, CameraInfo, CompressedImage
 from builtin_interfaces.msg import Time
 from std_srvs.srv import Trigger, SetBool
 from cv_bridge import CvBridge
@@ -102,6 +102,9 @@ class Anafi(Node):
 		# Publishers
 		self.pub_image = self.node.create_publisher(Image, 'camera/image', qos_profile)
 		self.pub_camera_info = self.node.create_publisher(CameraInfo, 'camera/camera_info', qos_profile)
+		self.publish_compressed = self.node.declare_parameter('camera/publish_compressed', False,
+														ParameterDescriptor(description="Publish CompressedImage on camera/image/compressed")).value
+		self.pub_image_compressed = None  # Will be created only if publishing compressed images
 		self.pub_time = self.node.create_publisher(Time, 'time', qos_profile)
 		self.pub_attitude = self.node.create_publisher(QuaternionStamped, 'drone/attitude', qos_profile_sensor_data)
 		self.pub_altitude = self.node.create_publisher(Float32, 'drone/altitude', qos_profile_sensor_data)
@@ -125,6 +128,10 @@ class Anafi(Node):
 		self.pub_gps_fix = self.node.create_publisher(Bool, 'drone/gps/fix', qos_profile)
 		self.pub_steady = self.node.create_publisher(Bool, 'drone/steady', qos_profile_sensor_data)
 		self.pub_battery_health = self.node.create_publisher(UInt8, 'battery/health', qos_profile)
+
+		# Create compressed image publisher if enabled
+		if self.publish_compressed:
+			self.pub_image_compressed = self.node.create_publisher(CompressedImage, 'camera/image/compressed', qos_profile)
 
 		# Services
 		self.node.create_service(SetBool, 'drone/hand_launch', self.hand_launch_callback)
@@ -618,6 +625,19 @@ class Anafi(Node):
 				self.node.get_logger().debug("Parameter 'home/precise' set to '%s'" % precise_home_mode(precise_home))
 
 			# camera related
+			if parameter.name == 'camera/publish_compressed':
+				self.publish_compressed = parameter.value
+				if self.publish_compressed and self.pub_image_compressed is None:
+					self.pub_image_compressed = self.node.create_publisher(CompressedImage, 'camera/image/compressed', QoSProfile(
+						reliability=ReliabilityPolicy.RELIABLE,
+						durability=DurabilityPolicy.VOLATILE,
+						history=HistoryPolicy.KEEP_LAST,
+						depth=1
+					))
+					self.node.get_logger().info("Enabled CompressedImage publisher on camera/image/compressed")
+				elif not self.publish_compressed and self.pub_image_compressed is not None:
+					self.pub_image_compressed = None
+					self.node.get_logger().info("Disabled CompressedImage publisher")
 			if parameter.name == 'camera/mode':
 				self.camera_mode = parameter.value
 				self.drone(camera.set_camera_mode(  # https://developer.parrot.com/docs/olympe/arsdkng_camera.html#olympe.messages.camera.set_camera_mode
@@ -927,6 +947,13 @@ class Anafi(Node):
 				msg_image.header.frame_id = '/camera'
 				self.pub_image.publish(msg_image)
 
+				if self.pub_image_compressed is not None:
+					msg_image_compressed = cv_bridge.cv2_to_compressed_imgmsg(cv2frame, "jpg")
+					msg_image_compressed.header.stamp.sec = int(timestamp//1e6)
+					msg_image_compressed.header.stamp.nanosec = int((timestamp%1e6)*1e3)
+					msg_image_compressed.header.frame_id = '/camera'
+					self.pub_image_compressed.publish(msg_image_compressed)
+
 				self.msg_camera_info.header = header
 				self.pub_camera_info.publish(self.msg_camera_info)
 			else:
@@ -937,6 +964,15 @@ class Anafi(Node):
 	def takeoff_callback(self, request, response):
 		self.node.get_logger().warning("Taking off")
 		result = self.drone(TakeOff()).wait()  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.TakeOff
+
+		# Curntly the service returns when the drone accepts the takeoff command, but it does not wait for the drone to reach hovering state.
+		# result = self.drone(TakeOff(_no_expect=True) &
+		# 	FlyingStateChanged(
+		# 		state="hovering",
+		# 		_policy="wait",
+		# 		_timeout=15
+		# 	)
+		# ).wait()
 		if not self.simulation_environment:
 			try:
 				run_id = self.drone.get_state(olympe.messages.common.RunState.RunIdChanged) # https://developer.parrot.com/docs/olympe/arsdkng_common_runstate.html#olympe.messages.common.RunState.RunIdChanged
@@ -946,7 +982,7 @@ class Anafi(Node):
 				self.node.get_logger().warning("RunIdChanged state not initialized yet")
 
 		response.success = result.success()
-		response.message = ( "" if response.success else "Takeoff command rejected by the drone" )
+		response.message = ( "Takeoff Command accepted" if response.success else "Takeoff command rejected by the drone" )
 		return response
 	
 	def hand_launch_callback(self, request, response):
@@ -960,14 +996,14 @@ class Anafi(Node):
 				FlyingStateChanged(state="landed")
 			).wait()
 		response.success = result.success()
-		response.message = "" if response.success else "Hand launch command failed"
+		response.message = ( "Hand launch Command accepted" if response.success else "Hand launch command failed" )
 		return response
 
 	def land_callback(self, request, response):
 		result = self.drone(Landing()).wait() # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.Landing
 		self.node.get_logger().info("Landing")
 		response.success = result.success()
-		response.message = "" if response.success else "Land command rejected by the drone"
+		response.message = ( "Land Command accepted" if response.success else "Land command rejected by the drone" )
 		return response
 
 	def emergency_callback(self, request, response):
@@ -1058,10 +1094,6 @@ class Anafi(Node):
 			self.node.get_logger().info("REST API: PUT http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan,  data=" + request.file)
 			# http_response = requests.put(url="http://" + self.ip + ":180/api/v" + str(self.rest_api_version) + "/upload/flightplan", data=open(request.file, "rb"))
 			http_response = requests.put(url="http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan", data=open(request.file, "rb"))
-
-			print(http_response.text)
-			print(http_response.json())
-
 			http_response.raise_for_status()
 			self.uid = str(http_response.json())
 			self.node.get_logger().info("FlightPlan uploaded with UID " + self.uid)
@@ -1084,11 +1116,7 @@ class Anafi(Node):
 					url="http://" + self.ip + "/api/v" + str(self.rest_api_version) + "/upload/flightplan",
 					data=open(request.file, "rb")
 				)
-
-				print(upload_response.text)
-				print(upload_response.json())
-
-				
+				time.sleep(1)
 				upload_response.raise_for_status()
 				flightplan_id = str(upload_response.json())
 				self.uid = flightplan_id
@@ -1102,6 +1130,7 @@ class Anafi(Node):
 				return response
 
 			self.node.get_logger().warning("FlightPlan starting with ID " + flightplan_id)
+			time.sleep(1)
 			result = self.drone(
 				start_at_v2(
 					flightplan_id,
