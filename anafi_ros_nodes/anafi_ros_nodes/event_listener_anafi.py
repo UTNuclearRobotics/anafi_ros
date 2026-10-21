@@ -19,8 +19,10 @@ from olympe.enums import gimbal
 from olympe.messages.user_storage import format_result, format_progress, info as user_storage_info, monitor as user_storage_monitor
 from olympe.messages.user_storage_v2 import monitor as user_storage_monitor2
 from olympe.enums.user_storage import formatting_result
-from olympe.messages.ardrone3.PilotingState import AltitudeChanged, AttitudeChanged, GpsLocationChanged, AlertStateChanged, ForcedLandingAutoTrigger, HoveringWarning, VibrationLevelChanged, WindStateChanged, NavigateHomeStateChanged
+from olympe.messages.ardrone3.PilotingState import AltitudeChanged, AttitudeChanged, GpsLocationChanged, AlertStateChanged, ForcedLandingAutoTrigger, HoveringWarning, VibrationLevelChanged, WindStateChanged, NavigateHomeStateChanged, moveToChanged, moveByChanged
 from olympe.enums.ardrone3.PilotingState import AlertStateChanged_State, ForcedLandingAutoTrigger_Reason, VibrationLevelChanged_State, WindStateChanged_State
+from olympe.messages.ardrone3.PilotingEvent import moveByEnd
+from olympe.enums.ardrone3.PilotingEvent import MoveByEnd_Error
 from olympe.messages.ardrone3.GPSSettingsState import HomeChanged
 from olympe.messages.common.CommonState import LinkSignalQuality, MassStorageInfoStateListChanged, SensorsStatesListChanged
 from olympe.messages.rth import home_reachability as home_reachability_message, rth_auto_trigger, state as rth_state
@@ -33,7 +35,7 @@ from olympe.messages.camera import zoom_level
 from olympe.messages.camera2.Event import ZoomLevel as zoom_level2
 from olympe.messages.ardrone3.GPSState import NumberOfSatelliteChanged
 
-from anafi_ros_interfaces.msg import TargetTrajectory
+from anafi_ros_interfaces.msg import TargetTrajectory, MoveToStatus, MoveByStatus
 
 
 def print_event(event):
@@ -70,6 +72,8 @@ class EventListenerAnafi(olympe.EventListener):
 		self.pub_gimbal_absolute = self.drone.node.create_publisher(Vector3Stamped, 'gimbal/rpy_slow/absolute', qos_profile_sensor_data)
 		self.pub_storage_available = self.drone.node.create_publisher(UInt64, 'storage/available', qos_profile_system_default)
 		self.pub_home_location = self.drone.node.create_publisher(PointStamped, 'home/location', qos_profile_system_default)  # TODO: change to Location message
+		self.pub_moveto_status = self.drone.node.create_publisher(MoveToStatus, 'drone/moveto/status', qos_profile_system_default)
+		self.pub_moveby_status = self.drone.node.create_publisher(MoveByStatus, 'drone/moveby/status', qos_profile_system_default)
 
 	""" 
 	FATAL ERRORS 
@@ -223,6 +227,48 @@ class EventListenerAnafi(olympe.EventListener):
 	def onMoveInfo(self, event, scheduler):
 		move_info = event.args
 		self.drone.node.get_logger().info('Move info: ' + str(move_info))
+
+	@olympe.listen_event(moveToChanged(_policy="wait"))  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.PilotingState.moveToChanged
+	def onMoveToChanged(self, event, scheduler):
+		move = event.args
+		msg = MoveToStatus()
+		msg.header.stamp = self.drone.node.get_clock().now().to_msg()
+		msg.status = move['status'].name
+		msg.latitude = float(move['latitude'])
+		msg.longitude = float(move['longitude'])
+		msg.altitude = float(move['altitude'])
+		msg.heading = float(move['heading'])
+		msg.orientation_mode = int(move['orientation_mode'].value)
+		self.pub_moveto_status.publish(msg)
+		self.drone.node.get_logger().info('Move-to %s: lat=%.6f, lon=%.6f, alt=%.2f' %
+									(msg.status, msg.latitude, msg.longitude, msg.altitude))
+
+	@olympe.listen_event(moveByChanged(_policy="wait"))  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.PilotingState.moveByChanged
+	def onMoveByChanged(self, event, scheduler):
+		move = event.args
+		msg = MoveByStatus()
+		msg.header.stamp = self.drone.node.get_clock().now().to_msg()
+		msg.status = move['status'].name
+		msg.dx_asked, msg.dy_asked, msg.dz_asked, msg.dyaw_asked = (
+			float(move['dXAsked']), float(move['dYAsked']), float(move['dZAsked']), float(move['dPsiAsked']))
+		msg.dx, msg.dy, msg.dz, msg.dyaw = float(move['dX']), float(move['dY']), float(move['dZ']), float(move['dPsi'])
+		self.pub_moveby_status.publish(msg)
+		self.drone.node.get_logger().info('Move-by %s: done (%.2f, %.2f, %.2f, %.2f) of (%.2f, %.2f, %.2f, %.2f)' %
+									(msg.status, msg.dx, msg.dy, msg.dz, msg.dyaw,
+									 msg.dx_asked, msg.dy_asked, msg.dz_asked, msg.dyaw_asked))
+
+	# The ANAFI Ai (in Sphinx at least) ends an extended move-by with moveByEnd and never sends moveByChanged.
+	@olympe.listen_event(moveByEnd(_policy="wait"))  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.PilotingEvent.moveByEnd
+	def onMoveByEnd(self, event, scheduler):
+		move = event.args
+		self.drone.moveby_running = False
+		msg = MoveByStatus()
+		msg.header.stamp = self.drone.node.get_clock().now().to_msg()
+		msg.status = {MoveByEnd_Error.ok: 'DONE', MoveByEnd_Error.interrupted: 'CANCELED'}.get(move['error'], 'ERROR')
+		msg.dx, msg.dy, msg.dz, msg.dyaw = float(move['dX']), float(move['dY']), float(move['dZ']), float(move['dPsi'])
+		self.pub_moveby_status.publish(msg)
+		self.drone.node.get_logger().info('Move-by %s (%s): done (%.2f, %.2f, %.2f, %.2f)' %
+									(msg.status, move['error'].name, msg.dx, msg.dy, msg.dz, msg.dyaw))
 
 	@olympe.listen_event(format_progress(_policy="wait"))  # https://developer.parrot.com/docs/olympe/arsdkng_user_storage.html#olympe.messages.user_storage.format_progress
 	def onFormatProgress(self, event, scheduler):

@@ -19,6 +19,8 @@ set(msg_files
 	"msg/PilotingCommand.msg"
 	"msg/MoveByCommand.msg"
 	"msg/MoveToCommand.msg"
+	"msg/MoveToStatus.msg"
+	"msg/MoveByStatus.msg"
 	"msg/CameraCommand.msg"
 	"msg/GimbalCommand.msg"
 	"msg/SkycontrollerCommand.msg"
