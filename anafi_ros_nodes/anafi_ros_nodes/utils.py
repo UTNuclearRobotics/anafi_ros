@@ -27,7 +27,7 @@ def euler_from_quaternion(quaternion):
     roll = numpy.arctan2(sinr_cosp, cosr_cosp)
 
     sinp = 2 * (w * y - z * x)
-    pitch = numpy.arcsin(sinp)
+    pitch = numpy.arcsin(numpy.clip(sinp, -1.0, 1.0))  # at +-90 deg (a gimbal pointing straight down) float error puts sinp just past 1: NaN
 
     siny_cosp = 2 * (w * z + x * y)
     cosy_cosp = 1 - 2 * (y * y + z * z)
