@@ -181,12 +181,13 @@ class Anafi(Node):
 		self.rest_api_version = self.node.declare_parameter('storage/rest_api_version', 1, ParameterDescriptor(read_only=True)).value
 		self.node.declare_parameter("drone/offboard", False,  ParameterDescriptor(description="Enable offboard or manual control"))
 		simulation = self.node.declare_parameter('drone/simulation', False, ParameterDescriptor(read_only=True, description="Treat device/ip as a simulated drone (e.g. Sphinx on a remote host)")).value
+		skycontroller = self.node.declare_parameter('device/skycontroller', False, ParameterDescriptor(read_only=True, description="Treat device/ip as a SkyController (e.g. bridged from a remote host)")).value
 
-		if self.ip == '192.168.42.1' and not simulation:  # direct WiFi connection to the drone
+		if self.ip == '192.168.42.1' and not simulation and not skycontroller:  # direct WiFi connection to the drone
 			self.skycontroller_enabled = False
 			self.simulation_environment = False
 		else:
-			if self.ip.startswith('192.168.') and not simulation:  # connection through SkyController
+			if (self.ip.startswith('192.168.') or skycontroller) and not simulation:  # connection through SkyController
 				self.skycontroller_enabled = True
 				self.simulation_environment = False
 			else:
