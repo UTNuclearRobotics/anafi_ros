@@ -39,8 +39,13 @@ from olympe.messages import gimbal, camera, mapper, move, thermal, obstacle_avoi
 from olympe.messages.drone_manager import connection_state
 from olympe.messages.flight_plan import start_at_v2
 from olympe.enums.flight_plan import mavlink_type
-from olympe.messages.ardrone3.Piloting import TakeOff, UserTakeOff, Landing, Emergency, PCMD, NavigateHome, StartPilotedPOIV2, StopPilotedPOI 
-from olympe.messages.ardrone3.PilotingState import FlyingStateChanged
+from olympe.messages.ardrone3.Piloting import TakeOff, UserTakeOff, Landing, Emergency, PCMD, NavigateHome, StartPilotedPOIV2, StopPilotedPOI, CancelMoveTo, CancelMoveBy
+from olympe.messages.ardrone3.PilotingState import FlyingStateChanged, moveToChanged, moveByChanged
+from olympe.enums.ardrone3.PilotingState import FlyingStateChanged_State, MoveToChanged_Status, MoveByChanged_Status
+from olympe.messages.common.MavlinkState import MavlinkFilePlayingStateChanged
+from olympe.enums.common.MavlinkState import MavlinkFilePlayingStateChanged_State
+from olympe.messages.rth import state as rth_state
+from olympe.enums.rth import state as rth_state_enum
 from olympe.messages.ardrone3.PilotingSettings import MaxTilt, MaxDistance, MaxAltitude, NoFlyOverMaxDistance, BankedTurn
 from olympe.messages.ardrone3.SpeedSettings import MaxVerticalSpeed, MaxRotationSpeed, MaxPitchRollRotationSpeed
 from olympe.messages.ardrone3.GPSSettingsState import GPSFixStateChanged
@@ -204,6 +209,7 @@ class Anafi(Node):
 			self.drone = olympe.Drone(self.ip)
 
 		# Create event listeners
+		self.moveby_running = False  # a move-by was sent and its moveByEnd has not arrived
 		self.event_listener_anafi = EventListenerAnafi(self)
 		self.event_listener_skycontroller = EventListenerSkyController(self)
 
@@ -965,7 +971,14 @@ class Anafi(Node):
 
 	def takeoff_callback(self, request, response):
 		self.node.get_logger().warning("Taking off")
-		result = self.drone(TakeOff()).wait()  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.TakeOff
+		# TakeOff's own expectation is a takingoff state. A TakeOff that cancels a landing (see halt_callback)
+		# goes straight back to hovering without one, and waiting on it blocked every callback for 10 s.
+		self.drone(TakeOff())  # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.TakeOff
+		up = (FlyingStateChanged_State.motor_ramping, FlyingStateChanged_State.takingoff,
+			FlyingStateChanged_State.hovering, FlyingStateChanged_State.flying)
+		deadline = time.monotonic() + self.HALT_TIMEOUT
+		while self.drone_state(FlyingStateChanged, 'state') not in up and time.monotonic() < deadline:
+			time.sleep(0.02)
 
 		# Curntly the service returns when the drone accepts the takeoff command, but it does not wait for the drone to reach hovering state.
 		# result = self.drone(TakeOff(_no_expect=True) &
@@ -983,7 +996,7 @@ class Anafi(Node):
 			except ValueError:
 				self.node.get_logger().warning("RunIdChanged state not initialized yet")
 
-		response.success = result.success()
+		response.success = self.drone_state(FlyingStateChanged, 'state') in up
 		response.message = ( "Takeoff Command accepted" if response.success else "Takeoff command rejected by the drone" )
 		return response
 	
@@ -1002,9 +1015,15 @@ class Anafi(Node):
 		return response
 
 	def land_callback(self, request, response):
-		result = self.drone(Landing()).wait() # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.Landing
+		# Landing's own expectation is a landing state, which a take-off aborted before lift-off never
+		# reports (it goes straight to landed): waiting on it blocked every callback for 10 s.
+		self.drone(Landing()) # https://developer.parrot.com/docs/olympe/arsdkng_ardrone3_piloting.html#olympe.messages.ardrone3.Piloting.Landing
 		self.node.get_logger().info("Landing")
-		response.success = result.success()
+		down = (FlyingStateChanged_State.landing, FlyingStateChanged_State.landed)
+		deadline = time.monotonic() + self.HALT_TIMEOUT
+		while self.drone_state(FlyingStateChanged, 'state') not in down and time.monotonic() < deadline:
+			time.sleep(0.02)
+		response.success = self.drone_state(FlyingStateChanged, 'state') in down
 		response.message = ( "Land Command accepted" if response.success else "Land command rejected by the drone" )
 		return response
 
@@ -1020,17 +1039,50 @@ class Anafi(Node):
 		response.message = "" if response.success else "Emergency command rejected by the drone"
 		return response
 
-	def halt_callback(self, request, response):  # calls all commands to halt
+	HALT_TIMEOUT = 3.0  # seconds to wait for the drone to confirm that each motion stopped
+
+	def halt_callback(self, request, response):  # stops whatever the drone is flying and leaves it hovering
+		# Replies only once the drone reports every motion stopped (or after HALT_TIMEOUT), so a caller
+		# that waits for the reply knows a command it sends next cannot be canceled by this halt.
+		# A take-off is left to finish: it ends in a hover anyway.
 		self.drone(PCMD(flag=1, roll=0, pitch=0, yaw=0, gaz=0, timestampAndSeqNum=0))
 		self.drone(NavigateHome(start=0))
 		self.drone(StopPilotedPOI())
-		self.drone(olympe.messages.common.Mavlink.Stop())
 		self.drone(olympe.messages.follow_me.stop())
+		self.drone(CancelMoveTo())  # no effect without a move-to; PCMD does not stop one
+		self.drone(CancelMoveBy())
+		self.drone(olympe.messages.common.Mavlink.Stop())
 		self.drone(olympe.messages.rth.abort())
-		self.node.get_logger().warning("HALT!!!")
-		response.success = True
-		response.message = "Halted"
+
+		running = {
+			"move-to": lambda: self.drone_state(moveToChanged, 'status') == MoveToChanged_Status.RUNNING,
+			"move-by": lambda: self.moveby_running or self.drone_state(moveByChanged, 'status') == MoveByChanged_Status.RUNNING,
+			"return-home": lambda: self.drone_state(rth_state, 'state') in (rth_state_enum.in_progress, rth_state_enum.pending),
+			"flight plan": lambda: self.drone_state(MavlinkFilePlayingStateChanged, 'state') == MavlinkFilePlayingStateChanged_State.playing,
+		}
+		landing = lambda: self.drone_state(FlyingStateChanged, 'state') == FlyingStateChanged_State.landing
+		if landing():
+			# A TakeOff during a landing cancels it and the drone hovers where it is (ANAFI Ai in Sphinx).
+			# Positive gaz, the way Olympe's Landing doc gives, did nothing there: PCMDs had no effect at all.
+			self.drone(TakeOff())
+			running["landing"] = landing
+
+		deadline = time.monotonic() + self.HALT_TIMEOUT
+		while any(check() for check in running.values()) and time.monotonic() < deadline:
+			time.sleep(0.02)
+		still = [what for what, check in running.items() if check()]
+		state = self.drone_state(FlyingStateChanged, 'state')
+		response.success = not still
+		response.message = ("Halted, %s" % (state.name if state is not None else "state unknown")) if not still else \
+			"Still running after %.1f s: %s" % (self.HALT_TIMEOUT, ", ".join(still))
+		self.node.get_logger().warning("HALT: " + response.message)
 		return response
+
+	def drone_state(self, message, field):  # last reported value of one field of a drone state, None before the first report
+		try:
+			return self.drone.get_state(message)[field]
+		except Exception:
+			return None
 		
 	def navigate_home_callback(self, request, response):
 		if request.data:
@@ -1423,6 +1475,7 @@ class Anafi(Node):
 			timestampAndSeqNum=0))
 
 	def moveBy_callback(self, msg):		
+		self.moveby_running = True  # until moveByEnd
 		self.drone(move.extended_move_by( # https://developer.parrot.com/docs/olympe/arsdkng_move.html?#olympe.messages.move.extended_move_by
 			d_x=msg.dx, # displacement along the front axis (m)
 			d_y=msg.dy, # displacement along the right axis (m)
@@ -1431,7 +1484,7 @@ class Anafi(Node):
 			max_horizontal_speed=self.max_horizontal_speed,
 			max_vertical_speed=self.max_vertical_speed,
 			max_yaw_rotation_speed=self.max_yaw_rate
-		)).wait()
+		))  # not waited for: the move takes seconds and would block every other callback; see drone/moveby/status
 	
 	def moveTo_callback(self, msg):		
 		self.drone(move.extended_move_to( # https://developer.parrot.com/docs/olympe/arsdkng_move.html?#olympe.messages.move.extended_move_to
@@ -1443,7 +1496,7 @@ class Anafi(Node):
 			max_horizontal_speed=self.max_horizontal_speed,
 			max_vertical_speed=self.max_vertical_speed,
 			max_yaw_rotation_speed=self.max_yaw_rate
-		)).wait()
+		))  # not waited for: a rejected move-to never reports RUNNING, and the wait would block every other callback; see drone/moveto/status
 
 	def zoom_callback(self, msg):
 		self.drone(camera.set_zoom_target(  # https://developer.parrot.com/docs/olympe/arsdkng_camera.html#olympe.messages.camera.set_zoom_target

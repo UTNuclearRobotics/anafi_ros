@@ -32,6 +32,8 @@
 | `drone/gps/fix` 		| `std_msgs/Bool` 				| 1 Hz 		| {`true`: GPS is fixed, `false`: GPS is not fixed} 					| 			| |
 | `drone/gps/location` 		| `sensor_msgs/NavSatFix` 			| 1 Hz 		| 											| Drone’s GPS location 					|	|
 | `drone/gps/satellites` 		| `std_msgs/UInt8` 				| 		| 											| Number of GPS satellites 					|	|
+| `drone/moveby/status` 		| [`anafi_ros_interfaces/MoveByStatus`](details.md#movebystatus) 	| on change 	| {`RUNNING`, `DONE`, `CANCELED`, `ERROR`} 					| Progress of the drone's move-by 					|	|
+| `drone/moveto/status` 		| [`anafi_ros_interfaces/MoveToStatus`](details.md#movetostatus) 	| on change 	| {`RUNNING`, `DONE`, `CANCELED`, `ERROR`} 					| Progress of the drone's move-to, with its target 					|	|
 | `drone/rpy` 			| `geometry_msgs/Vector3Stamped` 			| 30 Hz 	| 											| Drone’s roll, pitch and yaw in north-west-up frame 			| º 	| 
 | `drone/rpy_slow` 		| `geometry_msgs/Vector3Stamped` 			| 		| 											| Drone’s attitude 					|	|
 | `drone/speed` 			| `geometry_msgs/Vector3Stamped` 			| 30 Hz 	| 											| Drone's speed in body frame 						| m/s 	| 
@@ -61,7 +63,7 @@
 | `drone/arm` 				| `std_srvs/srv/SetBool` 			| {`true`: arm the drone, `false`: disarm the drone} 						|
 | `drone/calibrate` 			| `std_srvs/srv/Trigger` 			| start drone's magnetometer calibration process 						|
 | `drone/emergency` 			| `std_srvs/srv/Trigger` 			| cut out the motors 										|
-| `drone/halt` 				| `std_srvs/srv/Trigger` 			| halt and start hovering 									|
+| `drone/halt` 				| `std_srvs/srv/Trigger` 			| stop whatever the drone is flying (move-to, move-by, return-home, flight plan, landing) and hover; replies once the drone reports them stopped (up to 3 s), `success` false if one is still running |
 | `drone/land` 				| `std_srvs/srv/Trigger` 			| land the drone 										|
 | `drone/reboot` 				| `std_srvs/srv/Trigger` 			| reboot the drone 										|
 | `drone/rth` 				| `std_srvs/srv/Trigger` 			| return home 											|
@@ -150,6 +152,24 @@
 - *float64* **altitude**: altitude (m)
 - *float32* **heading**: heading w.r.t. North (º)
 - *uint8* **orientatio_mode**: orientation mode {`0`: none, `1`: to target, `2`: heading start, `3`: heading during}
+
+#### MoveToStatus
+- *Header* **header**: header of the message
+- *string* **status**: {`RUNNING`, `DONE`, `CANCELED`, `ERROR`}
+- *float64* **latitude**: target latitude (º)
+- *float64* **longitude**: target longitude (º)
+- *float64* **altitude**: target altitude above the take-off point (m)
+- *float32* **heading**: heading w.r.t. North (º)
+- *uint8* **orientation_mode**: orientation mode {`0`: none, `1`: to target, `2`: heading start, `3`: heading during}
+
+#### MoveByStatus
+- *Header* **header**: header of the message
+- *string* **status**: {`RUNNING`, `DONE`, `CANCELED`, `ERROR`}
+- *float32* **dx_asked**, **dy_asked**, **dz_asked**: asked displacement along the front, right and down axes (m)
+- *float32* **dyaw_asked**: asked rotation of heading (rad)
+- *float32* **dx**, **dy**, **dz**: displacement done so far (m)
+- *float32* **dyaw**: rotation done so far (rad)
+
 #### PilotingCommand
 - *Header* **header**: header of the message
 - *float32* **roll**: roll angle (º)
